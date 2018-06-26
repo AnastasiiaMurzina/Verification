@@ -7,12 +7,98 @@ binaries = '&', '^', '~', '|'
 extra = '(', ',', '.', ')', ' ', ':', '[', ']'
 builds = dir (__builtins__)
 
+global funcs
+funcs = {}
+
+bads = set([])
+
 def reader(file_name):
     acc = []
     with open(file_name, 'r') as f:
         for line in f:
             acc.append(line.replace('\n', ''))
     return acc
+
+
+def eraser_comment():
+    global lines
+    flag = True
+    for ix, line in enumerate(lines):
+        sharp = line.find('#')
+        if sharp != -1 and flag: lines[ix] = line[:sharp]
+        if line.find("'''") != -1 and line.find("\"'''\"") == -1: flag ^= True
+        if not flag: lines[ix] = ''
+
+
+def find_defs(lines):
+    for ix, i in enumerate(lines):
+        if len(i) > 4 and i.replace(' ', '')[0:3] == 'def':
+            opened = i.find('(')
+            closed = i[::-1].find(')')
+            fname = i[4:opened].replace(" ", '')
+            params = i[opened+1:-closed-1].replace(' ', '')
+            params = params.split(',')
+            sparams = set([])
+            eq_flag = False
+            ssparams, ssparamss = None, None
+            for ip in params:
+                stars = ip.count('*')
+                eq = ip.find('=')
+                if eq != -1: eq_flag = True
+                if len(ip) > 0 and not ssparams and not ssparamss and (ip[0] != '*' or stars == 0):
+                    if ip in set.union(sparams, funcs):
+                        print("SyntaxError: duplicate argument '", ip, "' in function definition, line", ix+1)
+                        bads.add(fname)
+                    if eq == -1 and eq_flag:
+                        print('SyntaxError: non-default argument follows defaul argument, line', ix+1)
+                        bads.add(fname)
+                    else:
+                        sparams.add(ip[:eq if eq != -1 else None])
+                elif stars >= 1 and ip[0] == '*' and not ssparams and not ssparamss:
+                    if ip[1::] in set.union(sparams, funcs):
+                        print("SyntaxError: duplicate argument '", ip, "' in function definition, line", ix+1)
+                        bads.add(fname)
+                    else:
+                        sparams.add(ip[1:])
+                        ssparams = ip[1:]
+                elif stars > 2 and ip[0] == '**' and not ssparamss:
+                    if ip[2::] in set.union(sparams, funcs):
+                        print("SyntaxError: duplicate argument '", ip, "' in function definition, line", ix + 1)
+                        bads.add(fname)
+                    else:
+                        sparams.add(ip[2:])
+                        ssparamss = ip[2:]
+            if fname not in bads:
+                funcs.update({fname: [[sparams, ssparams, ssparamss], [i.count('=') == 1 for i in params]]})#fix = equation here!
+    return funcs
+
+
+def find_fissues(lines):
+    issues = []
+    for ix, line in enumerate(lines):
+        ex_line = line.replace(' ', '')
+        if not (len(ex_line) > 4 and ex_line[0:3] == 'def'):
+            for i in (re.split('|'.join(map(re.escape, binaries+bifs+operators+extra+tuple(builds))), line)):
+                if i.replace(' ', '') != '' and i in funcs.keys():
+                    issues.append([ix, i])
+    return issues
+
+
+def functions_used(fissues):
+    used = set([i for _, i in fissues])
+    if used != set(funcs.keys()):
+        print('There some unused:', set(funcs.keys()).difference(used))
+
+
+def check_issues(issues, lines): #for example function
+    for num, f_isname in issues:
+        pos = lines[num].find(f_isname+'(')
+        actual_args = lines[num][pos+len(f_isname)+1:lines[num].find(')')].replace(' ', '').split(',')
+        print(actual_args)
+        if len(funcs[f_isname][0][0]) == len(actual_args):
+            pass #it's ok
+        else:
+            pass # check else
 
 
 def space_counter(line):
@@ -28,135 +114,16 @@ def check_unreach(lines):
     stop_words = ('return', 'break', 'continue', 'yield')
     for ix, line in enumerate(lines):
         for i in stop_words:
-            if line.count(i):
+            if line.startswith(i+' '):
                 if ix + 1 < len(lines) and space_counter(line) == space_counter(lines[ix+1]):
                     print('WARNING: Unreachable line', ix + 1, ':', lines[ix+1])
                 break
 
-
-def find_assign(lines):
-    assigns = []
-    for line in lines:
-        if line.count('=') == 1:
-            line = line.replace(' ', '').split('=')
-            flag = False
-            for i in operators+bifs+binaries:
-                if i in line[0]:
-                    flag = True
-                    assigns.append(False)
-                    break
-            if not flag: assigns.append(True)
-        else:
-            assigns.append(False)
-    assigns = [i for i, j in enumerate(assigns) if j]
-    return assigns
-
-
-def assign_for(lines):
-    fors = []
-    ix = 0
-    for line in lines:
-        if line.count('for'):
-            line = line.replace('for', '').replace(' ', '').replace(':', '').split('in')
-            line.insert(0, ix)
-            fors.append(line)
-        ix += 1
-    return fors
-
-
-def namespaces_search(lines):
-    '''
-    :return: {'global': {'parent':None, 'vars': []}, }
-    '''
-    namespace = {'global': {'parent': None, 'vars': [], 'spaces': 0}}
-    cur_space = 'global'
-    explicit_assigns = find_assign(lines)
-    for_assigns = assign_for(lines)
-    fors_count = 0
-    if_count = 0
-    assigns = explicit_assigns+for_assigns
-
-    def checker_usage(right):
-        xs = right
-        flags = [False for _ in xs]
-        sp = cur_space
-
-        while not (namespace[sp].get('parent') is None) and not all(flags):
-            for i in range(len(flags)):
-                if not flags[i]:
-                    if xs[i] in namespace[sp]['vars']:
-                        flags[i] = True
-            if not (namespace[sp]['parent'] is None):
-                sp = namespace[sp]['parent']
-        for i in range(len(flags)):
-            if not flags[i]:
-                if xs[i] in namespace[sp]['vars']:
-                    flags[i] = True
-        if not (namespace[sp]['parent'] is None):
-            sp = namespace[sp]['parent']
-        if not all(flags):
-            unfind = list(filter(lambda x: xs[x] != '', [i for i, j in enumerate(flags) if not j]))
-            print('ERROR: line', ix, ':', [xs[i] for i in unfind], ' vars are not expected to use')
-            return False
-        return True
-
-    for ix in range(len(lines)):
-        if lines[ix] != '' and lines[ix].replace(" ", '')[0] != '#':
-            c = space_counter(lines[ix])
-            if lines[ix] != '' and c < namespace[cur_space]['spaces'] and namespace[cur_space]['parent']:
-                cur_space = namespace[cur_space]['parent']
-            if ix in assigns:
-                left, right = lines[ix].replace(" ", '').split('=')
-                right = re.split('|'.join(map(re.escape, binaries+bifs+operators+extra+tuple(kwlist)+tuple(reversed(sorted(namespace.keys()))))), right)
-                r_check = list(filter(lambda x: not x.isdigit(), right))
-                if left.count(","):
-                    new_vars = left.replace(" ", '').split(',')
-                    if checker_usage(r_check):
-                        for j in new_vars:
-                            namespace[cur_space]['vars'].append(j)
-                else:
-                    if checker_usage(r_check):
-                        namespace[cur_space]['vars'].append(left)
-            elif lines[ix].count('def '):
-                c1 = space_counter(lines[ix+1])
-                line = lines[ix].replace(" ", '').replace('def', '').replace(':', '').split('(')
-                parent = cur_space
-                cur_space = line[0]
-                if line[1] != ')':
-                    line = line[1].replace(')', '')
-                    if line.count(','):
-                        args = line.split(',')
-                        namespace.update({cur_space: {'parent': parent, 'vars': args, 'spaces': c1}})
-                    else:
-                        arg = line
-                        namespace.update({cur_space: {'parent': parent, 'vars': [arg], 'spaces': c1}})
-                else:
-                    namespace.update({cur_space: {'parent': parent, 'vars': [], 'spaces': c1}})
-            elif lines[ix].count('if '):
-                if ix+1 < len(lines) and space_counter(lines[ix+1]) > space_counter(lines[ix]):
-                    namespace.update({'if'+str(if_count): {'parent': cur_space, 'vars': [], 'spaces': space_counter(lines[ix+1])}})
-                    cur_space = 'if' + str(if_count)
-                    if_count += 1
-            elif lines[ix].count('for '):
-                if ix+1 < len(lines) and space_counter(lines[ix+1]) > space_counter(lines[ix]):
-                    line = lines[ix][lines[ix].find('for')+4:lines[ix].find('in')]
-                    if line.count(","):
-                        args = line.replace(" ", '').split(',')
-                    else:
-                        args = [line.replace(" ", '')]
-                    namespace.update({'for'+str(fors_count): {'parent': cur_space, 'vars': args, 'spaces': space_counter(lines[ix+1])}})
-                    cur_space = 'for' + str(fors_count)
-                    fors_count += 1
-            else:
-                line = re.split('|'.join(map(re.escape, binaries+bifs+operators+extra)), lines[ix])
-                def fil_fun(x):
-                    return x != "" and not((x[0] == "'" and x[-1] == "'") or x in kwlist or x in builds or x in namespace.keys() or x.isdigit())
-                line = list(filter(lambda x: fil_fun(x), line))
-                checker_usage(line)
-        # print(namespace)
-
 if __name__ == '__main__':
     name = sys.argv[1]
     lines = reader(name)
+    eraser_comment()
     check_unreach(lines)
-    namespaces_search(lines)
+    funcs = find_defs(lines)
+    issues = find_fissues(lines)
+    functions_used(issues)
